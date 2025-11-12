@@ -1,7 +1,6 @@
-from flask import Flask, jsonify, request
+from flask import Flask, jsonify, request, send_file
 import requests
 import re
-import os
 from datetime import datetime
 from pathlib import Path
 
@@ -11,7 +10,7 @@ PICTURES_DIR.mkdir(exist_ok=True)
 NINJA_API_KEY = "V00gLHAVVVI2hzOBGlyZKw==AYJdHaNxAMDY7zEI"  # לפי המטלה: מותר לשים ישירות בקוד
 NINJA_URL = "https://api.api-ninjas.com/v1/animals"
 
-
+prev_url_by_pet = {}
 
 app = Flask(__name__)
 
@@ -23,22 +22,10 @@ def gen_id():
     next_id += 1
     return new_id
 
-def make_empty_pet_type(type_name):
-    return {
-        "id": gen_id(),       # string
-        "type": type_name,    # string
-        "family": None,       # יתמלא מאוחר יותר
-        "genus": None,        # יתמלא מאוחר יותר
-        "attributes": [],     # יתמלא מאוחר יותר
-        "lifespan": None,     # יתמלא מאוחר יותר
-        "pets": []            # רשימת חיות תחת סוג זה
-    }
-
 def pick_attributes(ninja_obj: dict) -> list:
 
     ch = ninja_obj.get("characteristics") or {}
     text = ch.get("temperament") or ch.get("group_behavior") or ""
-    # פירוק למילים באנגלית: אותיות/מספרים, מורידים רווחים/פסיקים וכו'
     words = re.findall(r"[A-Za-z]+", text)
     return words
 
@@ -78,6 +65,7 @@ def parse_birthdate(s):
         return datetime.strptime(s, "%d-%m-%Y").date()
     except Exception:
         return None
+
 def download_picture(url, type_id, pet_name):
     try:
         r = requests.get(url, timeout=10)
@@ -98,6 +86,14 @@ def download_picture(url, type_id, pet_name):
 
     except Exception:
         return None
+
+def find_pet_index(pets_list, target_name: str):
+    low = target_name.strip().lower()
+    for i, p in enumerate(pets_list):
+        if str(p.get("name", "")).strip().lower() == low:
+            return i
+    return None
+
 
 
 # /pet-types
@@ -134,11 +130,16 @@ def get_all_pet_types():
             if any((a or '').strip().lower() == attr for a in pt.get('attributes', []))
         ]
 
-    return jsonify(result), 200
+    public_result = []
+    for pt in result:
+        public_pt = dict(pt)
+        public_pt["pets"] = [p.get("name") for p in pt.get("pets", [])]
+        public_result.append(public_pt)
+
+    return jsonify(public_result), 200
 
 @app.route('/pet-types', methods=['POST'])
 def add_pet_type():
-    print("POST pet-types")
     try:
         # בדיוק כמו בשקף: בדיקת תוכן מדויקת, לא startswith
         content_type = request.headers.get('Content-Type')
@@ -194,7 +195,10 @@ def get_pet_type_by_id(id):
     pt = pet_types.get(id)
     if pt is None:
         return jsonify({"error": "Not found"}), 404  # 404
-    return jsonify(pt), 200  # 200
+
+    public_pt = dict(pt)
+    public_pt["pets"] = [p.get("name") for p in pt.get("pets", [])]
+    return jsonify(public_pt), 200
 
 @app.route('/pet-types/<string:id>', methods=['DELETE'])
 def delete_pet_type_by_id(id):
@@ -249,19 +253,24 @@ def add_pet_under_type(id):
     birthdate = data.get('birthdate', "NA")
     picture_url = data.get('picture-url')
 
+    # כפילות שם בתוך אותו type (case-insensitive)
     if any((p.get('name') or '').strip().lower() == name.strip().lower()
            for p in pet_types[id].get('pets', [])):
         return jsonify({"error": "Malformed data"}), 400
 
+    # ולידציית תאריך אם סופק
     if birthdate != "NA" and parse_birthdate(birthdate) is None:
         return jsonify({"error": "Malformed data"}), 400
 
+    # תמונה (אופציונלי)
     picture_file = "NA"
     if picture_url:
         fn = download_picture(picture_url, id, name)
         if not fn:
             return jsonify({"error": "Malformed data"}), 400
         picture_file = fn
+        # נשמור את ה-URL האחרון לחיה הזו (לבדיקת PUT)
+        prev_url_by_pet[(id, name)] = picture_url
 
     pet = {
         "name": name,
@@ -272,34 +281,43 @@ def add_pet_under_type(id):
     return jsonify(pet), 201
 
 
-
-
 # ---------- /pet-types/<id>/pets/<name> ----------
 @app.route('/pet-types/<string:id>/pets/<string:name>', methods=['GET'])
 def get_pet_by_name(id, name):
-    # מותר: 200, 404
     if id not in pet_types:
         return jsonify({"error": "Not found"}), 404
-    pet = next((p for p in pet_types[id].get("pets", []) if p.get("name") == name), None)
-    if pet is None:
+
+    pets = pet_types[id].get("pets", [])
+    idx = find_pet_index(pets, name)
+    if idx is None:
         return jsonify({"error": "Not found"}), 404
-    return jsonify(pet), 200
+
+    return jsonify(pets[idx]), 200
 
 @app.route('/pet-types/<string:id>/pets/<string:name>', methods=['DELETE'])
 def delete_pet_by_name(id, name):
-    # מותר: 204, 404
     if id not in pet_types:
         return jsonify({"error": "Not found"}), 404
+
     pets = pet_types[id].get("pets", [])
-    idx = next((i for i, p in enumerate(pets) if p.get("name") == name), None)
+    idx = find_pet_index(pets, name)
     if idx is None:
         return jsonify({"error": "Not found"}), 404
-    # (שלב 8–9: אם יש picture ≠ "NA" — למחוק גם קובץ)
+
+    pic = pets[idx].get("picture", "NA")
+    if pic and pic != "NA":
+        try:
+            (PICTURES_DIR / pic).unlink(missing_ok=True)
+        except Exception:
+            pass
+
     pets.pop(idx)
+
+    prev_url_by_pet.pop((id, name), None)
     return '', 204
+
 @app.route('/pet-types/<string:id>/pets/<string:name>', methods=['PUT'])
 def update_pet_by_name(id, name):
-    # מותר: 200, 400, 404, 415
     if id not in pet_types:
         return jsonify({"error": "Not found"}), 404
 
@@ -308,31 +326,76 @@ def update_pet_by_name(id, name):
         return jsonify({"error": "Expected application/json media type"}), 415
 
     data = request.get_json()
-    required_fields = ['name']  # לפי המטלה, חייב לפחות name
-    if not data or not all(field in data for field in required_fields):
+    if not data or 'name' not in data:
         return jsonify({"error": "Malformed data"}), 400
 
     pets = pet_types[id].get("pets", [])
-    idx = next((i for i, p in enumerate(pets) if p.get("name") == name), None)
+    idx = find_pet_index(pets, name)
     if idx is None:
         return jsonify({"error": "Not found"}), 404
 
-    # (שלב 8–9: טיפול 'picture-url' אם שונה; כאן מינימלי)
+    current = pets[idx]
+    new_name = data['name']
+    new_birthdate = data.get('birthdate', current.get('birthdate', "NA"))
+    if new_birthdate != "NA" and parse_birthdate(new_birthdate) is None:
+        return jsonify({"error": "Malformed data"}), 400
+
+    new_picture = "NA"
+
+    if 'picture-url' in data:
+        url = data['picture-url']
+        # האם זה אותו URL כמו האחרון ששמרנו לחיה הזו?
+        last_key_old_name = (id, current.get('name'))
+        last_url = prev_url_by_pet.get(last_key_old_name)
+
+        if last_url and str(last_url).strip() == str(url).strip():
+            new_picture = current.get('picture', "NA")
+
+        else:
+            # URL חדש: ננסה להוריד ולשמור
+            fn = download_picture(url, id, new_name)
+            if not fn:
+                return jsonify({"error": "Malformed data"}), 400
+            new_picture = fn
+            prev_url_by_pet[(id, new_name)] = url
+
+    # עדכון הרשומה
     updated = {
-        "name": data['name'],
-        "birthdate": data.get('birthdate', "NA"),
-        "picture": pets[idx].get('picture', "NA")
+        "name": new_name,
+        "birthdate": new_birthdate,
+        "picture": new_picture
     }
     pets[idx] = updated
+
+    # אם השם השתנה, ננקה את המפתח הישן במיפוי ה-URL
+    if new_name != name:
+        prev_url_by_pet.pop((id, name), None)
+
     return jsonify(updated), 200
 
 
 # ---------- /pictures/<file-name> ----------
+
 @app.route('/pictures/<string:filename>', methods=['GET'])
 def get_picture(filename):
-    # מותר: 200 (תמונה), 404
-    # (שלב 9: קריאת קובץ והחזרת image/jpeg/png; אם אין — 404)
-    return jsonify({"message": f"GET picture file {filename}"}), 200
+    # לפי המטלה: מחזירים את הקובץ עצמו (200) או 404 אם לא קיים.
+    file_path = PICTURES_DIR / filename
+    if not file_path.is_file():
+        return jsonify({"error": "Not found"}), 404  # לפי ההוראות
+
+    lower = filename.lower()
+    if lower.endswith('.jpg') or lower.endswith('.jpeg'):
+        mimetype = 'image/jpeg'
+    elif lower.endswith('.png'):
+        mimetype = 'image/png'
+    else:
+        # המטלה מגבילה לקבצי jpg/png בלבד
+        return jsonify({"error": "Not found"}), 404
+
+    # מחזירים גם את הקובץ וגם סטטוס 200, בדיוק לפי המטלה
+    return send_file(file_path, mimetype=mimetype), 200
+
+
 
 
 
