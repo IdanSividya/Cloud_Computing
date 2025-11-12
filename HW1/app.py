@@ -1,6 +1,12 @@
 from flask import Flask, jsonify, request
 import requests
 import re
+import os
+from datetime import datetime
+from pathlib import Path
+
+PICTURES_DIR = Path("pictures")
+PICTURES_DIR.mkdir(exist_ok=True)
 
 NINJA_API_KEY = "V00gLHAVVVI2hzOBGlyZKw==AYJdHaNxAMDY7zEI"  # לפי המטלה: מותר לשים ישירות בקוד
 NINJA_URL = "https://api.api-ninjas.com/v1/animals"
@@ -66,6 +72,33 @@ def fetch_ninja_exact_type(type_name: str):
         if isinstance(item, dict) and (item.get("name", "").strip().lower() == lower):
             return item, None
     return None, None  # 200 אבל אין התאמה מדויקת -> יטופל כ-400 במתודת ה-POST
+
+def parse_birthdate(s):
+    try:
+        return datetime.strptime(s, "%d-%m-%Y").date()
+    except Exception:
+        return None
+def download_picture(url, type_id, pet_name):
+    try:
+        r = requests.get(url, timeout=10)
+        if r.status_code != 200:
+            return None
+
+        content_type = r.headers.get("Content-Type", "")
+        if content_type not in ("image/jpeg", "image/png"):
+            return None
+
+        ext = ".jpg" if content_type == "image/jpeg" else ".png"
+        file_name = f"{type_id}_{pet_name}{ext}"
+
+        with open(PICTURES_DIR / file_name, "wb") as f:
+            f.write(r.content)
+
+        return file_name
+
+    except Exception:
+        return None
+
 
 # /pet-types
 @app.route('/pet-types', methods=['GET'])
@@ -156,7 +189,7 @@ def add_pet_type():
         return jsonify({"server error": str(e)}), 500
 
 # /pet-types/<id>
-@app.route('/pet-types/<id>', methods=['GET'])
+@app.route('/pet-types/<string:id>', methods=['GET'])
 def get_pet_type_by_id(id):
     pt = pet_types.get(id)
     if pt is None:
@@ -175,11 +208,28 @@ def delete_pet_type_by_id(id):
 # ---------- /pet-types/<id>/pets ----------
 @app.route('/pet-types/<string:id>/pets', methods=['GET'])
 def get_pets_by_type(id):
-    # מותר: 200, 404
     if id not in pet_types:
         return jsonify({"error": "Not found"}), 404
-    # (שלב 7: סינון birthdateGT/LT)
-    return jsonify(pet_types[id].get("pets", [])), 200
+
+    pets = list(pet_types[id].get("pets", []))
+
+    gt_raw = request.args.get("birthdateGT")
+    lt_raw = request.args.get("birthdateLT")
+    gt_date = parse_birthdate(gt_raw) if gt_raw else None
+    lt_date = parse_birthdate(lt_raw) if lt_raw else None
+
+    def pet_date(p):
+        d = p.get("birthdate")
+        if not d or d == "NA":
+            return None
+        return parse_birthdate(d)
+
+    if gt_date:
+        pets = [p for p in pets if (pet_date(p) and pet_date(p) > gt_date)]
+    if lt_date:
+        pets = [p for p in pets if (pet_date(p) and pet_date(p) < lt_date)]
+
+    return jsonify(pets), 200
 
 @app.route('/pet-types/<string:id>/pets', methods=['POST'])
 def add_pet_under_type(id):
@@ -191,18 +241,38 @@ def add_pet_under_type(id):
         return jsonify({"error": "Expected application/json media type"}), 415
 
     data = request.get_json()
-    required_fields = ['name']  # birthdate / picture-url אופציונליים
+    required_fields = ['name']
     if not data or not all(field in data for field in required_fields):
         return jsonify({"error": "Malformed data"}), 400
 
-    # (שלב 7: הורדת תמונה אם יש picture-url; כרגע מינימלי)
+    name = data['name']
+    birthdate = data.get('birthdate', "NA")
+    picture_url = data.get('picture-url')
+
+    if any((p.get('name') or '').strip().lower() == name.strip().lower()
+           for p in pet_types[id].get('pets', [])):
+        return jsonify({"error": "Malformed data"}), 400
+
+    if birthdate != "NA" and parse_birthdate(birthdate) is None:
+        return jsonify({"error": "Malformed data"}), 400
+
+    picture_file = "NA"
+    if picture_url:
+        fn = download_picture(picture_url, id, name)
+        if not fn:
+            return jsonify({"error": "Malformed data"}), 400
+        picture_file = fn
+
     pet = {
-        "name": data['name'],
-        "birthdate": data.get('birthdate', "NA"),
-        "picture": "NA"
+        "name": name,
+        "birthdate": birthdate,
+        "picture": picture_file
     }
     pet_types[id].setdefault("pets", []).append(pet)
     return jsonify(pet), 201
+
+
+
 
 # ---------- /pet-types/<id>/pets/<name> ----------
 @app.route('/pet-types/<string:id>/pets/<string:name>', methods=['GET'])
