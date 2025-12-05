@@ -3,11 +3,12 @@ import requests
 import re
 from datetime import datetime
 from pathlib import Path
+import os
 
 PICTURES_DIR = Path("pictures")
 PICTURES_DIR.mkdir(exist_ok=True)
 
-NINJA_API_KEY = "V00gLHAVVVI2hzOBGlyZKw==AYJdHaNxAMDY7zEI"  # לפי המטלה: מותר לשים ישירות בקוד
+NINJA_API_KEY =os.getenv("API_KEY")
 NINJA_URL = "https://api.api-ninjas.com/v1/animals"
 
 prev_url_by_pet = {}
@@ -58,7 +59,7 @@ def fetch_ninja_exact_type(type_name: str):
     for item in data:
         if isinstance(item, dict) and (item.get("name", "").strip().lower() == lower):
             return item, None
-    return None, None  # 200 אבל אין התאמה מדויקת -> יטופל כ-400 במתודת ה-POST
+    return None, None
 
 def parse_birthdate(s):
     try:
@@ -101,14 +102,13 @@ def find_pet_index(pets_list, target_name: str):
 def get_all_pet_types():
     result = list(pet_types.values())
 
-    args = request.args  # Query string params
+    args = request.args
 
-    # 1) סינון לפי שדות: id/type/family/genus/lifespan
+
     for field in ['id', 'type', 'family', 'genus', 'lifespan']:
         if field in args:
             value = args.get(field, '')
             if field == 'lifespan':
-                # השוואה מספרית; אם הערך לא מספר -> פשוט לא תמצא התאמות (ואין קוד שגיאה)
                 try:
                     wanted = int(value)
                 except ValueError:
@@ -122,7 +122,6 @@ def get_all_pet_types():
                     if ((pt.get(field) or '')).strip().lower() == wanted
                 ]
 
-    # 2) סינון hasAttribute=<attr> (case-insensitive)
     if 'hasAttribute' in args:
         attr = (args.get('hasAttribute') or '').strip().lower()
         result = [
@@ -141,25 +140,22 @@ def get_all_pet_types():
 @app.route('/pet-types', methods=['POST'])
 def add_pet_type():
     try:
-        # בדיוק כמו בשקף: בדיקת תוכן מדויקת, לא startswith
         content_type = request.headers.get('Content-Type')
         if content_type != 'application/json':
             return jsonify({"error": "Expected application/json media type"}), 415
 
         data = request.get_json()
-        # Check if required fields are present (לנו יש שדה חובה יחיד: 'type')
         required_fields = ['type']
         if not data or not all(field in data for field in required_fields):
             return jsonify({"error": "Malformed data"}), 400
 
         req_type = data['type']
 
-        # בדיקת כפילות (הוגדר במטלה כ-400 על כפילות)
         if any(pt.get("type", "").strip().lower() == req_type.strip().lower()
                for pt in pet_types.values()):
             return jsonify({"error": "Malformed data"}), 400
 
-        # קריאה ל-Ninja
+
         record, api_err = fetch_ninja_exact_type(req_type)
         if api_err:
             print("Exception (Ninja):", api_err)
@@ -167,7 +163,6 @@ def add_pet_type():
         if record is None:
             return jsonify({"error": "Malformed data"}), 400
 
-        # נרמול נתונים מהתשובה:
         family, genus = extract_family_genus(record)
         attributes = pick_attributes(record)
         lifespan = parse_lifespan(record)
@@ -209,7 +204,7 @@ def delete_pet_type_by_id(id):
     del pet_types[id]
     return '', 204
 
-# ---------- /pet-types/<id>/pets ----------
+#  /pet-types/<id>/pets
 @app.route('/pet-types/<string:id>/pets', methods=['GET'])
 def get_pets_by_type(id):
     if id not in pet_types:
@@ -253,23 +248,19 @@ def add_pet_under_type(id):
     birthdate = data.get('birthdate', "NA")
     picture_url = data.get('picture-url')
 
-    # כפילות שם בתוך אותו type (case-insensitive)
     if any((p.get('name') or '').strip().lower() == name.strip().lower()
            for p in pet_types[id].get('pets', [])):
         return jsonify({"error": "Malformed data"}), 400
 
-    # ולידציית תאריך אם סופק
     if birthdate != "NA" and parse_birthdate(birthdate) is None:
         return jsonify({"error": "Malformed data"}), 400
 
-    # תמונה (אופציונלי)
     picture_file = "NA"
     if picture_url:
         fn = download_picture(picture_url, id, name)
         if not fn:
             return jsonify({"error": "Malformed data"}), 400
         picture_file = fn
-        # נשמור את ה-URL האחרון לחיה הזו (לבדיקת PUT)
         prev_url_by_pet[(id, name)] = picture_url
 
     pet = {
@@ -281,7 +272,7 @@ def add_pet_under_type(id):
     return jsonify(pet), 201
 
 
-# ---------- /pet-types/<id>/pets/<name> ----------
+#  /pet-types/<id>/pets/<name>
 @app.route('/pet-types/<string:id>/pets/<string:name>', methods=['GET'])
 def get_pet_by_name(id, name):
     if id not in pet_types:
@@ -336,7 +327,7 @@ def update_pet_by_name(id, name):
 
     current = pets[idx]
     new_name = data['name']
-    new_birthdate = data.get('birthdate', current.get('birthdate', "NA"))
+    new_birthdate = data.get('birthdate',"NA")
     if new_birthdate != "NA" and parse_birthdate(new_birthdate) is None:
         return jsonify({"error": "Malformed data"}), 400
 
@@ -344,7 +335,6 @@ def update_pet_by_name(id, name):
 
     if 'picture-url' in data:
         url = data['picture-url']
-        # האם זה אותו URL כמו האחרון ששמרנו לחיה הזו?
         last_key_old_name = (id, current.get('name'))
         last_url = prev_url_by_pet.get(last_key_old_name)
 
@@ -352,14 +342,12 @@ def update_pet_by_name(id, name):
             new_picture = current.get('picture', "NA")
 
         else:
-            # URL חדש: ננסה להוריד ולשמור
             fn = download_picture(url, id, new_name)
             if not fn:
                 return jsonify({"error": "Malformed data"}), 400
             new_picture = fn
             prev_url_by_pet[(id, new_name)] = url
 
-    # עדכון הרשומה
     updated = {
         "name": new_name,
         "birthdate": new_birthdate,
@@ -367,21 +355,19 @@ def update_pet_by_name(id, name):
     }
     pets[idx] = updated
 
-    # אם השם השתנה, ננקה את המפתח הישן במיפוי ה-URL
     if new_name != name:
         prev_url_by_pet.pop((id, name), None)
 
     return jsonify(updated), 200
 
 
-# ---------- /pictures/<file-name> ----------
+#  /pictures/<file-name>
 
 @app.route('/pictures/<string:filename>', methods=['GET'])
 def get_picture(filename):
-    # לפי המטלה: מחזירים את הקובץ עצמו (200) או 404 אם לא קיים.
     file_path = PICTURES_DIR / filename
     if not file_path.is_file():
-        return jsonify({"error": "Not found"}), 404  # לפי ההוראות
+        return jsonify({"error": "Not found"}), 404
 
     lower = filename.lower()
     if lower.endswith('.jpg') or lower.endswith('.jpeg'):
@@ -389,13 +375,9 @@ def get_picture(filename):
     elif lower.endswith('.png'):
         mimetype = 'image/png'
     else:
-        # המטלה מגבילה לקבצי jpg/png בלבד
         return jsonify({"error": "Not found"}), 404
 
-    # מחזירים גם את הקובץ וגם סטטוס 200, בדיוק לפי המטלה
     return send_file(file_path, mimetype=mimetype), 200
-
-
 
 
 

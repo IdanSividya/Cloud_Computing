@@ -15,7 +15,7 @@ RUN pip install --no-cache-dir --upgrade pip && \
 # We don't neccesary need FLASK_APP and FLASK_RUN_PORT in this case, but we stick to the lecture example.
 ENV FLASK_APP=app.py
 ENV FLASK_RUN_PORT=5001
-ENV API_KEY=w1sLxL3bAN8PgoQY9wap0w==2RArL5FHfhmGgxe1
+ENV API_KEY=V00gLHAVVVI2hzOBGlyZKw==AYJdHaNxAMDY7zEI
 
 # Expose port 5001 for the Flask application
 EXPOSE 5001
